@@ -103,7 +103,13 @@ def llm_decide(
 - Style: CTA phrasing the user can click, e.g., “Want to …”, “Interested in …”, “Need to …”, “See …”, “Compare …”, “Check …”, “Confirm …”.
 - for example
     -  "Want to check your customer’s eligibility?",
-    -  "Interested in incentive earnings for this engagement?"""
+    -  "Interested in incentive earnings for this engagement?
+PREFERENCE RULES:
+- If the user message contains numeric transaction context (e.g., ACV/ARR/revenue, %, currency symbols, hours, rates, seats),
+  and ANY passage appears to be a “Formula”, PREFER mode="answer" and pick that Formula passage’s index.
+- Never rely on external knowledge; only use provided passages.
+    """
+
 )
 
     user_msg = f'''User:
@@ -133,6 +139,10 @@ Rules:
 - If one short missing detail blocks precision, set mode=clarify with exactly ONE short question (options optional).
 - If unclear/out-of-scope, set mode=not_understood with a better rephrase in followup.message.
 - If mode=answer, 'recommendations' MUST include 3–5 grounded next questions relevant to Business Apps reseller partners, derived from the same passages only.
+- If the user is clearly asking to calculate payout/earnings and any Formula passage exists, pick that Formula passage for mode="answer".
+- Do not ask multiple clarifications; if one input is missing, ask exactly ONE short question.
+- Keep recommendations grounded in the same passages (no external facts).
+
 '''
 
     comp = client.chat.completions.create(
@@ -205,12 +215,50 @@ def llm_answer(*, user_text: str, passage: Dict[str, str]) -> str:
     title = (passage.get("title") or "").strip()
     content = passage.get("content") or ""
 
-    system_msg = (
-        "Answer in <=2 sentences. Copy figures exactly. No preface, no theory. "
-        "If truly unsure, output exactly: CLARIFY: \"<one short question>\""
-    )
+    blob = f"{title}\n{content}".lower()
+    is_formula = ("formula" in blob)  # minimal, robust enough with your data
 
-    user_msg = f"""User asked: "{user_text}"
+    if is_formula:
+        system_msg = (
+            "You are a precise incentive payout calculator.\n"
+  "If the passage contains a formula and user provides required numbers, "
+  "compute the payout.\n"
+  "Output format (no quotes):\n"
+  "ANSWER:\n"
+  "You will earn **USD <amount>**.\n"
+  "Breakdown: <formula substitution with numbers> = <result>\n"
+  "Rules:\n"
+  "- Always show currency (default USD if not specified).\n"
+  "- Format numbers with commas and 2 decimals.\n"
+  "- If inputs missing, output: CLARIFY: <one short question>."
+        )
+        # tip: lower temperature for deterministic math
+        answer_model = getattr(settings, "LLM_MODEL_ANSWER", "gpt-4o-mini")
+        temperature = 0.0
+
+        user_msg = f"""User message:
+{user_text}
+
+FORMULA PASSAGE (only source of rules; do not use anything else):
+{content}
+
+Output either:
+CLARIFY: "<one missing input question>"
+or
+ANSWER: "Payout: <amount and currency if present>. <≤1-line breakdown of how computed>"
+"""
+    else:
+        system_msg = (
+        """You are a Microsoft Partner Incentives assistant.
+Your scope is STRICTLY Business Applications incentives.
+Answer ONLY from the provided passage.
+Do not invent or add external facts.
+If missing, return CLARIFY with exactly one short question."""
+        )
+        answer_model = getattr(settings, "LLM_MODEL_ANSWER", "gpt-4o-mini")
+        temperature = 0.2
+
+        user_msg = f"""User asked: "{user_text}"
 Use ONLY this passage (title: {title}):
 {content}
 
@@ -221,16 +269,14 @@ ANSWER: "<final 1–2 sentences>"
 """
 
     comp = client.chat.completions.create(
-        model=getattr(settings, "LLM_MODEL_ANSWER", "gpt-4o-mini"),
-        temperature=0.2,
-        messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_msg},
-        ],
+    model=answer_model,
+    temperature=temperature,
+    messages=[
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": user_msg},
+    ],
     )
     txt = (comp.choices[0].message.content or "").strip()
-    # normalize unexpected output
     if not (txt.startswith("ANSWER:") or txt.startswith("CLARIFY:")):
-        # Treat as answer by default
         txt = "ANSWER: " + txt
     return txt

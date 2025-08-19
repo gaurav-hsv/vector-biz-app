@@ -1,0 +1,10 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+pydantic==2.7.4
+pydantic-settings==2.3.3
+python-dotenv==1.0.1
+psycopg[binary]==3.2.1
+psycopg-pool==3.2.1
+openai==1.40.3
+redis==5.0.8
+tenacity==8.5.0

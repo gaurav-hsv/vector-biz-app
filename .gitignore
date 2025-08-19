@@ -1,0 +1,73 @@
+# ---------------------------------
+# Python
+# ---------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter / experiments
+.ipynb_checkpoints/
+*.ipynb
+*.ipynb~
+
+# Logs
+*.log
+*.out
+*.err
+logs/
+*.sqlite3
+
+# ---------------------------------
+# Node / JS (for frontend/NestJS)
+# ---------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Build outputs
+.next/
+out/
+coverage/
+build/
+
+# ---------------------------------
+# Env / Secrets
+# ---------------------------------
+.env
+.env.*
+!.env.example     # keep a safe template checked in
+
+# ---------------------------------
+# Data / Docs
+# ---------------------------------
+docs/*.csv
+docs/*.xlsx
+*.csv
+*.tsv
+*.xls
+*.xlsx
+
+# ---------------------------------
+# OS / Editor
+# ---------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace

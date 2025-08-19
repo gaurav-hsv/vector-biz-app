@@ -42,6 +42,61 @@ def _dedupe_keep_best(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             }
 
     return list(best.values())
+def _stitch_groups(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Group siblings by (engagement, field, group_id) when available,
+    stitch FULL parts in order, fallback to best content if no FULL present.
+    """
+    def norm(s): return (s or "").strip()
+
+    groups: dict[tuple, list] = {}
+    for r in rows:
+        eng   = norm(r.get("engagement_name"))
+        fld   = norm(r.get("field")) or norm(r.get("column_name"))
+        doc   = norm(r.get("doc_name"))
+        sect  = norm(r.get("section_path") or r.get("title"))
+        gid   = norm(r.get("group_id"))
+        # prefer row-level grouping; fallback to doc/section
+        if eng or fld:
+            gkey = (eng, fld, gid or f"{eng}::{fld}")
+        else:
+            gkey = (doc, sect, gid or f"{doc}::{sect}")
+        r["score"] = float(r.get("score", 0.0))
+        groups.setdefault(gkey, []).append(r)
+
+    stitched: List[Dict[str, Any]] = []
+    for _, sibs in groups.items():
+        # pick best row for metadata & ranking
+        best = max(sibs, key=lambda x: x["score"])
+        # collect FULL parts
+        full_parts = [s for s in sibs if (s.get("variant") == "full")]
+        full_parts.sort(key=lambda x: (x.get("part_index") or 0))
+        if full_parts:
+            content = "\n".join(p.get("content") or "" for p in full_parts if p.get("content"))
+            variant = "full"
+        else:
+            content = best.get("content") or ""
+            variant = best.get("variant") or None
+
+        stitched.append({
+            "id": best.get("id"),
+            "title": (best.get("title") or "").strip(),
+            "content": content,
+            "score": best["score"],
+            "field": best.get("field"),
+            "engagement_name": best.get("engagement_name"),
+            "column_name": best.get("column_name"),
+            "doc_name": best.get("doc_name"),
+            "kind": best.get("kind"),
+            "section_path": best.get("section_path"),
+            "heading_level": best.get("heading_level"),
+            "span_index": best.get("span_index"),
+            "group_id": best.get("group_id"),
+            "variant": variant,
+        })
+
+    stitched.sort(key=lambda x: x["score"], reverse=True)
+    return stitched
 
 
 def vector_search(
@@ -63,15 +118,26 @@ def vector_search(
     pre_limit = max(k * 20, 600)
 
     sql = """
-    SELECT
-        c.id, c.title, c.content, c.field, c.engagement_name, c.column_name,
-        c.section_path, c.heading_level, c.span_index,
-        d.name AS doc_name, d.kind AS kind,
-        1 - (c.embedding <=> %s::vector) AS score
-    FROM incentive_chunks c
-    JOIN incentive_documents d ON d.id = c.document_id
-    ORDER BY c.embedding <=> %s::vector
-    LIMIT %s;
+   SELECT
+    c.id, c.title, c.content, c.field, c.engagement_name, c.column_name,
+    c.section_path, c.heading_level, c.span_index,
+    d.name AS doc_name, d.kind AS kind,
+    c.meta,
+    (c.meta->>'variant')    AS variant,
+    (c.meta->>'group_id')   AS group_id,
+    NULLIF((c.meta->>'part_index'),'')::int   AS part_index,
+    NULLIF((c.meta->>'total_parts'),'')::int  AS total_parts,
+    1 - (c.embedding <=> %s::vector) AS score
+FROM incentive_chunks c
+JOIN incentive_documents d ON d.id = c.document_id
+ORDER BY
+    CASE (c.meta->>'variant')
+      WHEN 'full' THEN 0
+      WHEN 'overview' THEN 1
+      ELSE 2
+    END,
+    c.embedding <=> %s::vector
+LIMIT %s
     """
 
     pool = get_pool()
@@ -111,5 +177,5 @@ def vector_search(
             if "formula" in field or "formula" in title or "formula" in content:
                 r["score"] *= 1.20  # strong boost for formula passages
 
-    deduped = _dedupe_keep_best(rows)
+    deduped = _stitch_groups(rows)
     return sorted(deduped, key=lambda x: x["score"], reverse=True)[:k]

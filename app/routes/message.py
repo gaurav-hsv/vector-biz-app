@@ -196,12 +196,12 @@ def post_message(inp: MessageIn, debug: bool = Query(False, description="return 
                 payload["engagement_guess"] = eng_guess
             return payload
 
-    passages = _trim_passages(hits, max_chars=1200)
+    passages_for_decide = _trim_passages(hits, max_chars=12000)
     tail = get_tail(sid, n=6)
 
     # 3) Decide
     try:
-        decision = llm_decide(user_text=q, passages=passages, tail_messages=tail)
+        decision = llm_decide(user_text=q, passages=passages_for_decide, tail_messages=tail)
     except Exception as e:
         decision = {
             "mode": "clarify",
@@ -216,11 +216,11 @@ def post_message(inp: MessageIn, debug: bool = Query(False, description="return 
     # 4) Act
     if mode == "answer":
         pick = decision.get("pick")
-        if not isinstance(pick, int) or pick < 1 or pick > len(passages):
+        if not isinstance(pick, int) or pick < 1 or pick > len(hits):
             pick = 1
-        chosen = passages[pick - 1]
+        chosen_full = hits[pick - 1]
         try:
-            out = llm_answer(user_text=q, passage=chosen)
+            out = llm_answer(user_text=q, passage=chosen_full)
         except Exception as e:
             return {"type": "error", "session_id": sid, "error": "llm_answer_failed", "detail": str(e)[:200]}
 
@@ -232,7 +232,7 @@ def post_message(inp: MessageIn, debug: bool = Query(False, description="return 
             payload = {
                 "type": "answer",
                 "session_id": sid,
-                "engagement": chosen.get("title", ""),
+                "engagement": chosen_full.get("title", ""),
                 "text": text,
                 "confidence": float(decision.get("confidence", 0.0)),
                 "recommendations": decision.get("recommendations", _fallback_recommendations_from_hits(hits, 4))

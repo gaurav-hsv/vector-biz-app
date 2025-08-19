@@ -37,6 +37,7 @@ def vec_literal(vec: List[float]) -> str:
     return "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
 
 # ---- Unified DECISION call (answer / clarify / not_understood) ----
+
 @retry(
     reraise=True,
     stop=stop_after_attempt(getattr(settings, "LLM_MAX_RETRIES", 3)),
@@ -50,126 +51,135 @@ def llm_decide(
     tail_messages: List[Dict[str, str]] | None = None,
 ) -> Dict[str, Any]:
     """
-    Decide: answer / clarify / not_understood with strong schema guidance.
+    Decide: answer / clarify / not_understood with partner-friendly, schema-aware guidance.
     Returns STRICT JSON per schema.
     """
     import json, re
 
-    def _truncate(txt: str, limit: int = 1200) -> str:
-        if not txt:
-            return ""
+    def _tr(txt: str, limit: int = 1200) -> str:
+        if not txt: return ""
         return txt if len(txt) <= limit else txt[:limit] + "..."
 
-    # Build numbered passages (as before)
-    numbered_blocks = []
-    # Also build a compact CATALOG = idx | engagement | field | value peek (schema-aware)
-    catalog_rows = []
+    # Build numbered passages + a compact catalog (idx | engagement | field | value-ish)
+    numbered_blocks, catalog_rows = [], []
+    # Hints: collect incentive categories / types for clarify options
+    hint_categories, hint_types = set(), set()
     for i, p in enumerate(passages, start=1):
         t = (p.get("title") or "").strip()
-        c = _truncate(p.get("content") or "", 1200)
+        c = _tr(p.get("content") or "", 1200)
 
-        # Try to extract engagement/field/value from structured content
-        # Expected ingestion format:
-        #   Engagement: <name>\nField: <field_key>\nValue: <text>
+        # Try to parse light structure from naturalized chunks/titles
         eng = ""
-        fld = ""
-        val = ""
-        m_eng = re.search(r"\bEngagement:\s*([^\n]+)", c)
-        m_fld = re.search(r"\bField:\s*([^\n]+)", c)
-        m_val = re.search(r"\bValue:\s*(.*)$", c, re.DOTALL)
-        if m_eng: eng = m_eng.group(1).strip()
-        if m_fld: fld = m_fld.group(1).strip()
-        if m_val: val = _truncate(m_val.group(1).strip(), 160)
-
-        # Fallbacks from title if needed
-        if not eng and " · " in t:
+        fld = (p.get("field") or "").strip()
+        if " · " in t:
             eng = t.split(" · ", 1)[0].strip()
-        if not fld and " · " in t:
-            fld = t.split(" · ", 1)[1].strip()
 
+        # Mine categories/types from synthesized sentence if present
+        # e.g., "Types of incentives include categories such as Pre-sales and CSP Incentive,
+        # and incentive types such as Workshops, Transactions..."
+        m_cat = re.search(r"categories (?:such as )?(.+?)(?:\.|, and incentive|$)", c, re.I)
+        if m_cat:
+            for x in re.split(r",| and ", m_cat.group(1)):
+                x = x.strip()
+                if x: hint_categories.add(x)
+        m_typ = re.search(r"incentive types (?:such as )?(.+?)(?:\.|$)", c, re.I)
+        if m_typ:
+            for x in re.split(r",| and ", m_typ.group(1)):
+                x = x.strip()
+                if x: hint_types.add(x)
+
+        # Try to peek a short value from the content for the catalog
+        val = c.split("\n", 1)[0][:160]
         numbered_blocks.append(f"{i}) {t}\n{c}\n")
         catalog_rows.append(f"{i:>2} | {eng or '-'} | {fld or '-'} | {val or '-'}")
 
     passages_text = "\n".join(numbered_blocks) if numbered_blocks else "None"
     catalog_text = "idx | engagement | field | value\n" + "\n".join(catalog_rows) if catalog_rows else "None"
 
-    # Short tail context (keep as in your original)
+    # Recent tail (2 msgs)
     tail_txt = ""
     if tail_messages:
         last = tail_messages[-2:]
-        lines = []
-        for m in last:
-            role = m.get("role", "user")
-            txt = _truncate(m.get("text", ""), 300)
-            lines.append(f"{role}: {txt}")
-        tail_txt = "\n".join(lines) if lines else ""
+        tail_txt = "\n".join([f"{m.get('role','user')}: {_tr(m.get('text',''),300)}" for m in last])
 
-    # ---------------- SYSTEM PROMPT (schema-aware) ----------------
+    # Detect earnings intent up-front (maximize, increase payout, etc.)
+    earnings_intent = bool(re.search(
+        r"\b(increase|maximi[sz]e|boost|grow|get more|raise)\b.*\b(earn|earnings|payout|revenue)\b|"
+        r"\b(earnings?|payout|compensation)\b",
+        user_text, flags=re.I
+    ))
+
+    # Build hint options for clarify (caps at 6 each)
+    cat_opts = sorted(list(hint_categories))[:6]
+    type_opts = sorted(list(hint_types))[:6]
+    hint_block = ""
+    if cat_opts or type_opts:
+        hint_block = "OPTION_HINTS:\n"
+        if cat_opts:  hint_block += f"- Categories: {', '.join(cat_opts)}\n"
+        if type_opts: hint_block += f"- Types: {', '.join(type_opts)}\n"
+
+    # SYSTEM — “exec demo” clarity
     system_msg = (
-        "You are a production-grade Microsoft Partner Business Applications Incentives assistant.\n"
-        "Your scope is STRICTLY BizzApps incentives & engagements. Be decisive, minimal, precise.\n"
+        "You are a production-grade Microsoft Business Applications Partner Incentives assistant.\n"
+        "Operate with extreme clarity and restraint. Be decisive. No fluff.\n"
         "\n"
-        "HARD GROUNDING RULES:\n"
-        "- Use ONLY the provided passages.\n"
-        "- Never introduce external facts, rates, bands, or numbers.\n"
-        "- If exactly ONE missing input blocks precision, use mode='clarify' and ask ONE short question.\n"
-        "- For payout: NEVER ask for a 'cap' or 'market rate'. If geography matters, ask only for 'country'.\n"
-        "- If invalid/out-of-scope, use mode='not_understood' with a better rephrase.\n"
+        "GROUNDING:\n"
+        "- Use ONLY the provided passages & catalog. No external facts or numbers.\n"
+        "- If exactly ONE input is missing → mode='clarify' with ONE short question.\n"
+        "- For payout: NEVER ask about 'cap' or 'market rate'. If geography matters, ask only for 'country'.\n"
+        "- If invalid/out-of-scope → mode='not_understood' with a better rephrase.\n"
         "\n"
-        "FIELD GUIDE (what each field means & how to answer):\n"
-        "• engagement_type: High-level category (e.g., Pre-sales, CSP Incentive). If asked for 'types of incentives', list engagement_type values.\n"
-        "• incentive_type: Program type within an engagement (e.g., Pre-sales activities, Workshop, 1:Many Briefings, Transaction).\n"
-        "• workload / solution_play / specialization / solution_partner_designation: Return the exact value(s). No extra text.\n"
-        "• activity_requirement: Bullet-like requirements. Provide the exact requirement(s). If multiple relevant items exist, list 2–4 succinct bullets.\n"
-        "• customer_qualification: Customer-side eligibility. If explicit 'no requirement' or equivalent is present, state it plainly.\n"
-        "• partner_qualification: Partner-side eligibility. Same rule as above.\n"
-        "• product_eligibility / licensing_agreement: State exactly what's written (eligible SKUs, agreements). If none, state 'No requirement specified'.\n"
-        "• limits / maximum_incentive_earning_opportunity / revenue_threshold / minimum_hours: Return the explicit value. If not specified, say 'Not specified'.\n"
-        "• formula: When user asks to calculate payout/earnings or provides numeric context (ACV/ARR/%, seats, hours):\n"
-        "  - Prefer the passage with formula.\n"
-        "  - If all inputs present → answer directly (calculation happens later in the answer step).\n"
-        "  - If one input missing → ask one short clarification (country/ACV/hours/seats). Do NOT ask about caps.\n"
-        "• cpor: If stated as required/not required, answer directly. No extra clarification.\n"
-        "• partner_performance_measure / partner_proof_of_execution: Return exactly what's specified; if absent, say 'Not specified'.\n"
-        "• market_a/b/c & market_*_definition: If referenced, use exactly the given definitions; if geography needed, ask only for 'country'.\n"
+        "FIELD GUIDE (plain-English; NEVER show raw keys/braces/JSON):\n"
+        "• engagement_type → “The incentive categories are …”.\n"
+        "• incentive_type  → “Available incentive types include …”.\n"
+        "• activity_requirement → 1–4 crisp bullets; partner-facing.\n"
+        "• customer_qualification / partner_qualification → state requirement; if none, say “No [customer/partner] requirement.”\n"
+        "• product_eligibility / licensing_agreement → exact eligibility; if none, “No specific … requirement.”\n"
+        "• limits / maximum_incentive_earning_opportunity / revenue_threshold / minimum_hours → explicit value; else “Not specified.”\n"
+        "• formula → for compute/payout intent, prefer the formula passage.\n"
+        "• cpor / solution_partner_designation / specialization / solution_play → state succinctly.\n"
         "\n"
-        "DECISION POLICY:\n"
-        "- If the user asks for 'types of incentives' or 'incentive categories':\n"
-        "  • Prefer engagement_type values (e.g., Pre-sales, CSP Incentive). If incentive_type is also present, include both succinctly.\n"
-        "- For numeric/transactional questions (ACV/ARR/revenue/%/rate/hours/seats/payout/earnings):\n"
-        "  • If any passage is a formula passage, set mode='answer' and pick that formula passage.\n"
-        "- For eligibility/license questions:\n"
-        "  • Distinguish customer_qualification vs partner_qualification. Do not mix them.\n"
-        "  • If text says no requirement, answer directly; do not clarify.\n"
-        "- If question references or implies a specific engagement mentioned in recent context or passages, prefer that engagement's passage.\n"
-        "- If plural query ('types of…', 'which engagements…'), avoid single narrow answers—return the relevant set from the passages.\n"
+        "PREFERENCE RULES:\n"
+        "- If the user asks for 'types of incentives' or 'categories', prefer a categories/types passage.\n"
+        "- If numeric/transactional or 'calculate' intent → pick a formula passage.\n"
+        "- If 'increase/maximize earnings' intent:\n"
+        "  • If an 'overview' passage exists for the named engagement → pick that (it aggregates levers).\n"
+        "  • Else prefer passages that describe levers: activity_requirement, partner_performance_measure, proof_of_execution, limits, engagement_goal.\n"
+        "  • If engagement is not specified → mode='clarify' with a single question asking which engagement/type. Provide options if OPTION_HINTS exist.\n"
+        "- For plural queries (types/which), avoid a single narrow answer.\n"
         "\n"
-        "JSON OUTPUT RULES:\n"
-        "- Return STRICT JSON only (no extra text).\n"
-        "- Schema: {mode, why, pick, confidence, followup:{message,options}, recommendations[]}.\n"
-        "- pick is 1-based index into Passages if mode='answer'; null otherwise.\n"
-        "- recommendations: 3–5 unique CTA-style, grounded in the SAME passages (no external facts).\n"
+        """RECOMMENDATIONS
+- recomendation question purpose to continue the converations based on user original message.
+-Return 3–5 short, non-duplicative prompts that continue the conversation based on the ORIGINAL_USER_MESSAGE and what you just showed.
+- Style: CTA phrasing the user can click, e.g., “Want to …”, “Interested in …”, “Need to …”, “See …”, “Compare …”, “Check …”, “Confirm …”.
+- for example
+    -  "Want to check your customer’s eligibility for current incentives?"}",
+    -  "Interested in incentive earnings for this engagement?
+make sure in every recommendation to use the engagement name from the chosen passage.    
+"""
+
     )
 
-    # ---------------- USER PROMPT ----------------
     user_msg = f"""
 ORIGINAL USER MESSAGE:
 {user_text}
 
+EARNINGS_INTENT: {str(earnings_intent)}
+
 RECENT CONTEXT (last messages):
 {tail_txt or "None"}
 
-PASSAGES (numbered, full text):
+{hint_block or ""}PASSAGES (numbered):
 {passages_text}
 
-CATALOG (parsed overview: idx | engagement | field | value):
+CATALOG (idx | engagement | field | value):
 {catalog_text}
 
-Return EXACTLY this JSON schema:
+Return EXACTLY this JSON:
 {{
   "mode": "answer" | "clarify" | "not_understood",
   "why": "short reason",
-  "pick": <int or null>,               
+  "pick": <int or null>,
   "confidence": <number 0..1>,
   "followup": {{
     "message": "one short clarification/rephrase",
@@ -178,18 +188,14 @@ Return EXACTLY this JSON schema:
   "recommendations": ["q1","q2","q3","q4"]
 }}
 STRICT RULES:
-- Use ONLY the passages and the CATALOG.
-- If any passage precisely answers the question, set mode="answer" and the correct 1-based 'pick'.
-- If ONE short missing detail blocks precision, set mode="clarify" with exactly ONE short question (options optional).
-- If unclear/out-of-scope, set mode="not_understood" with a better rephrase in followup.message.
-- If user asks for 'types of incentives' or 'incentive categories', prefer engagement_type values; include incentive_type if clearly present.
-- For numeric or payout calculation intent, pick the formula passage if present.
-- Keep recommendations 3–5, CTA-style, deduped, grounded in the chosen/nearby passages only.
+- If a precise answer exists, set mode='answer' and the correct 1-based pick.\n
+- If ONE short detail blocks precision, set mode='clarify' with exactly one question. Use OPTION_HINTS to propose 2–4 clickable options.\n
+- Keep recommendations CTA-style, partner-friendly, 3–5 items, grounded in the chosen/nearby passages.\n
+- NEVER output raw field keys, braces, equals-sign lists, or JSON-like fragments to the user.\n
 """
 
-    # --------------- COMPLETION ---------------
     comp = client.chat.completions.create(
-        model=getattr(settings, "LLM_MODEL_RERANK", "gpt-4o-mini"),
+        model="gpt-4o",
         temperature=0.2,
         messages=[
             {"role": "system", "content": system_msg},
@@ -209,12 +215,11 @@ STRICT RULES:
             "recommendations": [],
         }
 
-    # --------------- SANITIZE ---------------
+    # sanitize
     mode = data.get("mode")
     if mode not in ("answer", "clarify", "not_understood"):
         data["mode"] = "clarify"
-        data.setdefault("followup", {})
-        data["followup"].setdefault("message", "Could you clarify your question in one sentence?")
+        data.setdefault("followup", {"message": "Could you clarify your question in one sentence?", "options": []})
         data["pick"] = None
         data["confidence"] = float(data.get("confidence", 0.0) or 0.0)
 
@@ -236,18 +241,15 @@ STRICT RULES:
 
     data["why"] = (data.get("why") or "").strip()[:200]
 
-    # Deduplicate & trim recommendations
+    # dedupe/trim recommendations
     recs = data.get("recommendations", [])
     if isinstance(recs, list):
         seen, cleaned = set(), []
         for q in recs:
             qn = (q or "").strip()
-            if not qn:
-                continue
-            low = qn.lower()
-            if low not in seen:
+            if qn and qn.lower() not in seen:
                 cleaned.append(qn)
-                seen.add(low)
+                seen.add(qn.lower())
         data["recommendations"] = cleaned[:5]
 
     return data
@@ -262,81 +264,98 @@ STRICT RULES:
 )
 def llm_answer(*, user_text: str, passage: Dict[str, str]) -> str:
     """
-    Produce ≤2 line final answer from the single chosen passage.
-    If truly blocked, return:  CLARIFY: "<one short question>"
-    Otherwise:                ANSWER: "<final text>"
+    Produce ≤2 line partner-friendly answer from the chosen passage.
+    If blocked: CLARIFY: "<one short question>"
+    Otherwise:  ANSWER: "<final text>"
     """
-    title = (passage.get("title") or "").strip()
-    content = passage.get("content") or ""
+    import re
+
+    title   = (passage.get("title") or "").strip()
+    content = (passage.get("content") or "")
+    field   = (passage.get("field") or "").lower()
 
     blob = f"{title}\n{content}".lower()
-    is_formula = ("formula" in blob)  # minimal, robust enough with your data
+    is_formula = ("formula" in blob)
+
+    # Detect earnings intent to shape tone (e.g., “how can I increase my earnings”)
+    earnings_intent = bool(re.search(
+        r"\b(increase|maximi[sz]e|boost|grow|get more|raise)\b.*\b(earn|earnings|payout)\b|"
+        r"\b(earnings?|payout)\b",
+        (user_text or ""), flags=re.I
+    ))
 
     if is_formula:
-        system_msg = ("""
-You are a precise, grounded payout calculator for Microsoft Business Apps incentives.
-SCOPE & GROUNDING:
-    -Use ONLY the provided snippet(s); do not import external facts.
-CALC RULES:
-        -If a formula is present and inputs are provided, compute payout.
-        -CAP: Never ask the user for a cap. If a 'Maximum Incentive Earning Opportunity' appears in the provided text, treat it as the hard cap; if not present, assume no cap.
-        -MARKET RATE: Never ask for 'market rate'. If geography matters, ask only for 'country'. When country is known and Market_A/B/C *definitions* appear in the provided text, map the country to A/B/C and use the corresponding Incentive_Market_[A|B|C] value.
-OUTPUT:
-                      ANSWER: You will earn **{currency} <amount>**.
-           • Breakdown: one short line showing the formula with substituted numbers and the result; if a cap applies, show the min() step.
-           FORMAT:
-            • Always include currency; format numbers with thousands separators and 2 decimals.
-            WHEN BLOCKED:
-             • If exactly one input is missing (e.g., country, ACV, hours),             
-                      """
-
+        system_msg = (
+            "You are a precise payout calculator for Microsoft Business Apps incentives.\n"
+            "GROUNDING: Use ONLY the provided passage. No external facts.\n"
+            "RULES:\n"
+            "- If formula inputs are present → compute payout.\n"
+            "- CAP: Never ask for a cap. If 'Maximum Incentive Earning Opportunity' is present, enforce it; otherwise no cap.\n"
+            "- MARKET: Never ask for 'market rate'. If geography matters, ask only for 'country'.\n"
+            "- If exactly one input is missing (ACV/ARR/%, hours, seats, country) → CLARIFY once.\n"
+            "FORMAT:\n"
+            "• ANSWER: Payout = <currency amount>. Short breakdown.\n"
+            "• Always include currency; 2-decimal, thousands separators.\n"
+            "• Or CLARIFY: <one short question>.\n"
         )
-        # tip: lower temperature for deterministic math
-        answer_model = getattr(settings, "LLM_MODEL_ANSWER", "gpt-4o-mini")
+        model = "gpt-4o"
         temperature = 0.0
-
         user_msg = f"""User message:
 {user_text}
 
-PASSAGE (only source of rules; do not use anything else):
+PASSAGE (formula only):
 {content}
 
-Output either:
+Respond with either:
 CLARIFY: <one missing input question>
 or
-ANSWER: Payout: <amount and currency if present>. <≤1-line breakdown of how computed>
+ANSWER: Payout = <amount and currency>. <≤1-line breakdown>
 """
     else:
+        # Partner-facing, with special handling for “increase earnings”
         system_msg = (
-        """You are a Microsoft Partner Incentives assistant.
-Your scope is STRICTLY Business Applications incentives.
-Answer ONLY from the provided passage.
-Do not invent or add external facts.
-If missing, return CLARIFY with exactly one short question."""
+            "You are a Microsoft Business Applications Partner Incentives assistant.\n"
+            "Rewrite the passage into a concise, human-friendly answer for a reseller partner.\n"
+            "GROUNDING: Use ONLY this passage. No external facts.\n"
+            "If missing/unclear, return CLARIFY with exactly one short question.\n"
+            "\n"
+            "IF EARNINGS INTENT IS TRUE:\n"
+            "- Give an 'Earnings levers' style answer for THIS engagement, derived ONLY from the passage:\n"
+            "  • What activities qualify to earn.\n"
+            "  • Any proof/performance/goal signals that drive payout.\n"
+            "  • Note limits/caps/minimums if present.\n"
+            "- Keep it to 1–2 sentences or 2–3 bullets. No speculation beyond the passage.\n"
+            "FORMAT: return either ANSWER: or CLARIFY: prefix.\n"
+             "STYLE:\n"
+             "- No hedging, no filler, no ellipses (...).\n"
+             "complete sentences, crisp and informative.\n"
+             "- Prefer plain language; keep any figures or counts exactly as written in the passage.\n"
+             "- If the passage lists activities/eligibility/requirements, summarize the essentials clearly.\n"
+             "FAILSAFE:\n"
+            "- If the passage truly lacks the needed fact, return CLARIFY with exactly one short question.\n"
         )
-        answer_model = getattr(settings, "LLM_MODEL_ANSWER", "gpt-4o-mini")
+        model = "gpt-4o"
         temperature = 0.2
-
         user_msg = f"""User asked: "{user_text}"
-Use ONLY this passage (title: {title}):
+EARNINGS_INTENT: {str(earnings_intent)}
+Use ONLY this passage (field: {field}, title: {title}):
 {content}
 
-Output either:
-CLARIFY: "<question>"
+Respond with either:
+CLARIFY: "<one short missing input question>"
 or
-ANSWER: "<final 1–2 sentences>"
+ANSWER: "<partner-friendly If earnings intent, phrase as 'Earnings levers' for this engagement using only what's here>"
 """
 
     comp = client.chat.completions.create(
-    model=answer_model,
-    temperature=temperature,
-    messages=[
-        {"role": "system", "content": system_msg},
-        {"role": "user", "content": user_msg},
-    ],
+        model=model,
+        temperature=temperature,
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ],
     )
     txt = (comp.choices[0].message.content or "").strip()
     if not (txt.startswith("ANSWER:") or txt.startswith("CLARIFY:")):
         txt = "ANSWER: " + txt
     return txt
-

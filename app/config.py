@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     PG_DSN: str
     OPENAI_API_KEY: str | None = None
     EMBED_MODEL: str = Field(default="text-embedding-3-small")
+    LLM_MODEL: str = Field(default="gpt-4o-mini")  # Default LLM model
 
     # These exist only if you added retries:
     LLM_MODEL_RERANK: str = Field(default="gpt-4o-mini")

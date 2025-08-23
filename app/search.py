@@ -12,12 +12,10 @@ EMBED_MODEL = settings.EMBED_MODEL
 emb = OpenAIEmbeddings(model=EMBED_MODEL)
 
 # Hard defaults (tweak here if ever needed)
-DEFAULT_TOP_K = 10
-DEFAULT_VEC_LIMIT = 60
-DEFAULT_FTS_LIMIT = 60
-DEFAULT_CTX_N = 5
-DEFAULT_CTX_FULL = True          # include full metadata per chunk
-DEFAULT_CTX_MAX_CHARS = 40000    # cap total context size
+DEFAULT_TOP_K = 15
+DEFAULT_VEC_LIMIT = 90
+DEFAULT_FTS_LIMIT = 90
+DEFAULT_CTX_N = 8
 
 def _vector_literal(vec: List[float]) -> str:
     return "[" + ",".join(f"{x:.8f}" for x in vec) + "]"

@@ -366,7 +366,7 @@ OUTPUT FORMAT
   * For workshops: explain the rule as “the lowest of: (i) 7.5% of ACV, (ii) hours × market rate, (iii) the $6,000 cap”, or as implied by the formula string. Mention key inputs (ACV, hours, market rate).
   * For CSP transactions: explain each engagement’s payout rule (e.g., “Core billed revenue × 4%”, “Tier 1 billed revenue × 7%”), referencing the engagement names.
   * For SPD eligibility: outline categories (Performance / Skilling / Customer Success), reference the provided sub-scores (e.g., usage, deployment), and show how they combine into the overall score if present.
-    - SPD eligibility criteria is  partners need to achieve a minimum Partner Capability Score of 70 points across performance, skilling, and customer success metrics. after adding all sub-score share points. and tell whether they are eligible or not based on the computed score highlight in bold.
+    - SPD eligibility criteria is partners need to achieve a minimum Partner Capability Score of 70 points across performance, skilling, and customer success metrics. after adding all sub-score share points. and please tell whether they are eligible or not based on the computed score highlight in bold.
 - Prefer labels from fields if available; else use field_name.
 - Keep it concise (≈70–160 words). Avoid dumping raw formula syntax; translate it to plain program rules.
 - Never instruct the user; just state what the result reflects and why.

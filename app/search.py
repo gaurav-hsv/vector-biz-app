@@ -3,6 +3,7 @@ from typing import List, Dict, Any
 from langchain_openai import OpenAIEmbeddings
 from .config import settings
 import re
+import json
 
 # ---- Config ----
 PG_DSN = settings.PG_DSN
@@ -45,6 +46,53 @@ def _norm_val(s: str) -> str:
     v = (s or "").strip()
     low = v.lower()
     return _NORMALIZE_VALUE.get(low, v)
+
+def _synthesize_sources_for_distinct(title: str, distinct_key: str, raw_values: List[Any]) -> List[Dict[str, Any]]:
+    # normalize + stable-unique
+    values: List[str] = []
+    seen = set()
+    for v in raw_values or []:
+        if isinstance(v, str):
+            s = _norm_val(v.strip())
+        elif isinstance(v, dict):
+            s = _norm_val((v.get("value") or v.get("name") or v.get("label") or json.dumps(v, ensure_ascii=False)).strip())
+        else:
+            s = _norm_val(str(v).strip())
+        if s and s not in seen:
+            seen.add(s)
+            values.append(s)
+
+    docs: List[Dict[str, Any]] = []
+    # aggregate doc so LLM can see the whole menu in one place
+    docs.append({
+        "id": f"facet::{distinct_key}::summary",
+        "content": f"{title}: " + ", ".join(values),
+        "metadata": {
+            "doc_type": "facet_summary",
+            "title": title,
+            "distinct_key": distinct_key,
+            "values": values,
+        },
+        "pretty_source": {"source": "facet", "file": "", "location": ""},
+    })
+
+    # one doc per value (helps picking a single option)
+    singular_title = title[:-1] if title.endswith("s") else title
+    for v in values:
+        docs.append({
+            "id": f"facet::{distinct_key}::{v}",
+            "content": f"{singular_title} option: {v}",
+            "metadata": {
+                "doc_type": "facet_option",
+                "title": title,
+                "distinct_key": distinct_key,
+                "value": v,
+                "name": v,  # hits your _TOPIC_KEYS ('name') for topic derivation
+            },
+            "pretty_source": {"source": "facet", "file": "", "location": ""},
+        })
+
+    return docs
 
 def _fetch_distinct_values(conn, meta_key: str) -> list[str]:
     # Pull DISTINCT (case-insensitive), drop empties, normalize, then unique again
@@ -121,7 +169,6 @@ def parse_kv(items: List[str]) -> Dict[str, str]:
     return out
 
 # -------------------------------------------------------
-# --- NEW: callable from your API ---
 def vector_search(query: str,
                   top_k: int = DEFAULT_TOP_K,
                   vec_limit: int = DEFAULT_VEC_LIMIT,
@@ -137,11 +184,17 @@ def vector_search(query: str,
         with psycopg2.connect(dsn) as conn:
             values = _fetch_distinct_values(conn, distinct_key)
         if values:
+            title = "Incentive types" if distinct_key == "incentive_type" else "Engagement types"
+            synth_sources = _synthesize_sources_for_distinct(title, distinct_key, values)
             return {
                 "mode": "distinct",
                 "distinct_key": distinct_key,
-                "title": "Incentive types" if distinct_key == "incentive_type" else "Engagement types",
+                "title": title,
                 "values": values,
+                "query": query,
+                "top_k": 0,
+                "returned": len(synth_sources),
+                "sources": synth_sources
             }
         # fall through if nothing found
 

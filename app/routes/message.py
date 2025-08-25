@@ -158,8 +158,9 @@ def post_message(inp: MessageIn, debug: bool = Query(False, description="return 
     # Retrieval
     search_results = vector_search(effective_query)
     #print(f"Search results: {search_results}")
+    sources = search_results.get("sources") or []
     # Derive and store topic for NEXT turn (from current retrieval)
-    topic = _derive_topic_from_sources(search_results.get("sources") or [])
+    topic = _derive_topic_from_sources(sources)
     #print(f"Derived topic: {topic}")
     if topic:
         _store_topic(session["session_id"], topic)
@@ -169,7 +170,7 @@ def post_message(inp: MessageIn, debug: bool = Query(False, description="return 
     #print(f"Detected user intent: {user_intent}")
 
     if(user_intent == 'information') :
-        result = generate_answer(effective_query, search_results['sources'])
+        result = generate_answer(effective_query,sources)
         # Persist assistant message (helps future heuristics if needed)
         append_message(session["session_id"], "assistant", (result.get("answer") or ""))
 
@@ -182,7 +183,7 @@ def post_message(inp: MessageIn, debug: bool = Query(False, description="return 
         }
         return resp
     
-    config = get_config_by_llm(inp.text, CALCULATIONS_CONFIG,search_results['sources'])
+    config = get_config_by_llm(inp.text, CALCULATIONS_CONFIG,sources)
 
     append_message(session["session_id"], "assistant", (json.dumps(config) or ""))
     #print(f"Config selected: {json.dumps(config)}")

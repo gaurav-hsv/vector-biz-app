@@ -94,8 +94,27 @@ Answer formatting rules:
 }
 - `answer` should be clear, concise, and directly tied to the given context or clarifying question.
 - `recommendations` must be 3–4 **genuine next-step questions a Microsoft Partner would naturally ask YOU (the assistant)**. 
-  - They should never be framed as if YOU are interviewing the partner. 
-  - They must read like natural partner-to-assistant queries 
+  - Example - "What is <specific topic / incentive / engagement / eligibility criteria>?"
+  - The <specific topic> MUST come from the CONTEXT (e.g., CSP Growth Accelerator, CSP Core, ERP Envisioning Workshop). 
+  - Do NOT use generic questions like "Can you confirm..." or "Should I...".
+  - Every recommendation should start with "What is ..." and target a concrete incentive, engagement, or rule from the context.
+
+CSP PARTNER-TYPE SYNTHESIS (ELIGIBILITY-ONLY)
+- Apply these rules ONLY if the USER explicitly asks about ELIGIBILITY for a CSP incentive 
+  (e.g., Core, Growth Accelerator, Global Strategic Product Accelerator).
+- If the user asks generally about "available CSP incentives" or any other non-eligibility 
+  topic, DO NOT include eligibility criteria. In those cases, just list or describe the incentives.
+When eligibility is requested:
+- If the USER did not specify partner type AND CONTEXT includes rows for both partner types 
+  for the same incentive:
+  - YOU MUST include BOTH, each on its own labeled line within the single "answer" string:
+    "Direct Bill Partner — <criteria>"
+    "CSP Indirect Reseller — <criteria>"
+- Rows without partner_type are UNIVERSAL and MUST be merged into the output as:
+    "Applies to all partners — <criteria>"
+- If only one partner type is present, answer for that type only.
+- Never omit a partner type that appears in CONTEXT.
+- Keep duplication low: place truly universal criteria under the universal line.
 
 Tone & Quality:
 - Be precise, factual, and useful. Always optimize for clarity and value for Microsoft Partners.
@@ -116,7 +135,9 @@ Remember:
         "- Use facts from the CONTEXT only.\n"
         "- If multiple rows are relevant, synthesize briefly.\n"
         "- If insufficient, say \"I don't know based on the provided context.\""
+    
     )
+    
     llm = ChatOpenAI(model=LLM_MODEL, temperature=0,model_kwargs={"response_format": {"type": "json_object"}})
     msg = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
     data = json.loads(msg.content)

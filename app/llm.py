@@ -264,7 +264,7 @@ STYLE & GUARDS
 - Headings may be used inside the body only if the answer is long (≥ 8 lines), never as the first line.
 - No decorative ASCII, no horizontal rules.
 - NO echoing the user’s question.
-- Don’t mention training data, retrieval, or internal mechanics.
+- Don’t mention training data, retrieval, or internal mechanics or row.
 - Rely ONLY on CONTEXT. If facts are still missing after fields are complete, say so in GFM and request that specific evidence.
 """
 
@@ -315,7 +315,7 @@ def generate(llm_messages: List[Dict[str, str]],
     5. NEVER use decorative characters (box/line drawing, ASCII art, repeated dashes/equals).
     6. Tables are encouraged for structured info.
     7. Format headings properly; present clean, easy-to-copy text.
-    8.  Do NOT mention or reference source names, file names, URLs, publishers, or document types (e.g., "Microsoft Learn", "Partner Center docs", "attached PDFs") anywhere in the output.
+    8.  Do NOT mention or reference source names, file names, URLs, publishers, or document types (e.g., "Microsoft Learn", "Partner Center docs", "attached PDFs") or row anywhere in the output.
     """.strip()
 
     system = (WRAPPER.strip() + "\n\n" + BASE_SYSTEM).strip()

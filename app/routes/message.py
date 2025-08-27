@@ -3,11 +3,11 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from ..search import vector_search
-from ..llm import generate_answer, detect_query_type, get_config_by_llm, is_country_answer, explain_from_dumped_config
+from ..llm import generate_answer, detect_route, get_config_by_llm, is_country_answer, explain_from_dumped_config, generate_concise_answer, generate
 from ..calculations_config import CALCULATIONS_CONFIG
 from ..country_config import resolve_market_from_text
 # Sessions (Redis-backed)
-from ..sessions_redis import get_session, append_message
+from ..sessions_redis import get_session, append_message, get_memory, set_memory
 
 # ---------------------------
 # NEW: lightweight context utils
@@ -106,97 +106,154 @@ class MessageIn(BaseModel):
     input_type: Optional[str] = None  # optional quick-pick
     config: Optional[Any] = None  # optional partial config to patch
 
+# @router.post("/message")
+# def post_message(inp: MessageIn, debug: bool = Query(False, description="return debug info")):
+#     # Load/append user message
+#     session = get_session(inp.session_id)
+#     append_message(session["session_id"], "user", inp.text)
+#     session = get_session(session["session_id"])
+
+#     if inp.input_type == "market_country":
+#         is_country = is_country_answer(inp.text)
+#         if is_country:
+#             # FIX: resolve returns (rate, country, market)
+#             market, country, rate = resolve_market_from_text(inp.text)
+#             cfg_in = inp.config or {}
+#             # Ensure we have a numeric rate (handle accidental 'A'/'B'/'C' just in case)
+#             rate_val = rate
+#             if isinstance(rate_val, str):
+#                 MR = {"A": 163, "B": 116, "C": 70}
+#                 rate_val = MR.get(rate_val.upper(), None)
+#         # (if your resolver already returns 163/116/70, this stays as-is)
+
+#             if rate_val is not None:
+#                 cfg_patched = _patch_workshop_with_market_rate(cfg_in, rate_val)
+#                 append_message(session["session_id"], "assistant", json.dumps(cfg_patched))
+#                 return {
+#                 "type": "answer",
+#                 "session_id": session["session_id"],
+#                 "text": "",
+#                 "config": cfg_patched,
+#                 "recommendations": [],
+#                 }
+
+#     if inp.input_type == "calc_submitted":
+#         dump_cfg = inp.config or {}
+#         llm_out = explain_from_dumped_config(dump_cfg)
+
+#         append_message(session["session_id"], "assistant", llm_out.get("answer", ""))
+
+#         return {
+#             "type": "answer",
+#             "session_id": session["session_id"],
+#             "text": llm_out.get("answer", ""),
+#             "recommendations": [],
+#         }
+
+#     # Reuse last topic if user uses pronouns like "this incentive"
+#     last_topic = _load_topic(session)
+#     is_followup = bool(last_topic) and _looks_like_followup_with_pronoun(inp.text)
+#     effective_query = (f"{last_topic} {inp.text}".strip()) if is_followup else inp.text
+
+#     # Retrieval
+#     search_results = vector_search(effective_query)
+#     #print(f"Search results: {search_results}")
+#     sources = search_results.get("sources") or []
+#     # Derive and store topic for NEXT turn (from current retrieval)
+#     topic = _derive_topic_from_sources(sources)
+#     print(f"Derived topic: {topic}")
+#     if topic:
+#         _store_topic(session["session_id"], topic)
+
+#     # LLM answer on the same effective query + sources
+#     route = detect_route(inp.text)
+#     print(f"Detected user intent: {route}")
+
+#     if route == "calculation":
+#         # existing calculation path
+#         config = get_config_by_llm(inp.text, CALCULATIONS_CONFIG, sources)
+#         append_message(session["session_id"], "assistant", (json.dumps(config) or ""))
+#         session = get_session(session["session_id"])
+#         return {
+#             "type": "answer",
+#             "session_id": session["session_id"],
+#             "text": "",
+#             "config": config,
+#             "recommendations": [],
+#         }
+#     history = session.get("messages", [])[-10:]
+#     llm_messages = []
+#     for m in history:
+#             role = m.get("role", "user")
+#             content = m.get("text", "")
+#             if content:
+#                 llm_messages.append({"role": role, "content": content})
+#     if not llm_messages or llm_messages[-1]["content"] != effective_query:
+#             llm_messages.append({"role": "user", "content": effective_query})
+    
+#     if(route == 'detail'):
+#         result = generate_answer(llm_messages, sources)
+#     else:
+#         result = generate_concise_answer(llm_messages, sources) 
+    
+#     append_message(session["session_id"], "assistant", (result.get("answer") or ""))
+
+#     session = get_session(session["session_id"])
+#     resp = {
+#             "type": "answer",
+#             "session_id": session["session_id"],
+#             "text": result.get("answer"),
+#             "recommendations": result.get("recommendations", []),
+#     }
+#     return resp
+    
+
 @router.post("/message")
 def post_message(inp: MessageIn, debug: bool = Query(False, description="return debug info")):
-    # Load/append user message
     session = get_session(inp.session_id)
     append_message(session["session_id"], "user", inp.text)
     session = get_session(session["session_id"])
 
-    if inp.input_type == "market_country":
-        is_country = is_country_answer(inp.text)
-        if is_country:
-            # FIX: resolve returns (rate, country, market)
-            market, country, rate = resolve_market_from_text(inp.text)
-            cfg_in = inp.config or {}
-            # Ensure we have a numeric rate (handle accidental 'A'/'B'/'C' just in case)
-            rate_val = rate
-            if isinstance(rate_val, str):
-                MR = {"A": 163, "B": 116, "C": 70}
-                rate_val = MR.get(rate_val.upper(), None)
-        # (if your resolver already returns 163/116/70, this stays as-is)
+    # Retrieval
+    search_results = vector_search(inp.text)
+    sources = search_results.get("sources") or []
 
-            if rate_val is not None:
-                cfg_patched = _patch_workshop_with_market_rate(cfg_in, rate_val)
-                append_message(session["session_id"], "assistant", json.dumps(cfg_patched))
-                return {
-                "type": "answer",
-                "session_id": session["session_id"],
-                "text": "",
-                "config": cfg_patched,
-                "recommendations": [],
-                }
+    # Build dialogue
+    history = session.get("messages", [])[-10:]
+    llm_messages = []
+    for m in history:
+        role = m.get("role", "user")
+        content = m.get("text", "")
+        if content:
+            llm_messages.append({"role": role, "content": content})
+    if not llm_messages or llm_messages[-1]["content"] != inp.text:
+        llm_messages.append({"role": "user", "content": inp.text})
 
-    if inp.input_type == "calc_submitted":
-        dump_cfg = inp.config or {}
-        llm_out = explain_from_dumped_config(dump_cfg)
+    # Let the model decide: ask or answer
+    result = generate(llm_messages, sources)
 
-        append_message(session["session_id"], "assistant", llm_out.get("answer", ""))
+    # Store what the user will see
+    out_text = result.get("question") if result.get("type") == "follow_up" else result.get("answer", "")
+    append_message(session["session_id"], "assistant", out_text)
 
+    session = get_session(session["session_id"])
+
+    # Pass-through envelope
+    if result["type"] == "follow_up":
+        out_text = result["question"]
+        append_message(session["session_id"], "assistant", out_text)
         return {
             "type": "answer",
             "session_id": session["session_id"],
-            "text": llm_out.get("answer", ""),
-            "recommendations": [],
+            "text": result["question"],
+            "missing_fields": result["missing_fields"]
         }
 
-    # Reuse last topic if user uses pronouns like "this incentive"
-    last_topic = _load_topic(session)
-    is_followup = bool(last_topic) and _looks_like_followup_with_pronoun(inp.text)
-    effective_query = (f"{last_topic} {inp.text}".strip()) if is_followup else inp.text
-
-    # Retrieval
-    search_results = vector_search(effective_query)
-    #print(f"Search results: {search_results}")
-    sources = search_results.get("sources") or []
-    # Derive and store topic for NEXT turn (from current retrieval)
-    topic = _derive_topic_from_sources(sources)
-    #print(f"Derived topic: {topic}")
-    if topic:
-        _store_topic(session["session_id"], topic)
-
-    # LLM answer on the same effective query + sources
-    user_intent = detect_query_type(inp.text)
-    #print(f"Detected user intent: {user_intent}")
-
-    if(user_intent == 'information') :
-        result = generate_answer(effective_query,sources)
-        # Persist assistant message (helps future heuristics if needed)
-        append_message(session["session_id"], "assistant", (result.get("answer") or ""))
-
-        session = get_session(session["session_id"])
-        resp = {
+    # type == "answer"
+    out_text = result["answer"]
+    append_message(session["session_id"], "assistant", out_text)
+    return {
         "type": "answer",
         "session_id": session["session_id"],
-        "text": result.get("answer"),
-        "recommendations": result.get("recommendations", []),
-        }
-        return resp
-    
-    config = get_config_by_llm(inp.text, CALCULATIONS_CONFIG,sources)
-
-    append_message(session["session_id"], "assistant", (json.dumps(config) or ""))
-    #print(f"Config selected: {json.dumps(config)}")
-
-    # Fresh session view
-    session = get_session(session["session_id"])
-
-    resp = {
-        "type": "answer",
-        "session_id": session["session_id"],
-        "text": "",
-         "config": config,
-        "recommendations": [],
+        "text": result["answer"]
     }
-    return resp
-    

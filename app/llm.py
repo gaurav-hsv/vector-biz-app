@@ -250,11 +250,12 @@ OUTPUT (return exactly ONE of these):
   }
 
 STYLE & GUARDS
-- All content in `question` or `answer` must be valid GFM (headings `#`, lists `-`, bold, tables).
+-- **All content in `question` or `answer` must be valid GitHub-Flavored Markdown (GFM).** Use `#` for headings, `-` for lists, `**bold**`, and tables where useful.
 - No decorative line/box ASCII, no repeated dashes as separators, no horizontal rules.
 - Don’t mention “training data”, retrieval, or internal mechanics.
 - If CONTEXT still lacks facts after fields are complete, say so in GFM and request the specific evidence.
 """
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -291,7 +292,8 @@ def generate(llm_messages: List[Dict[str, str]],
     ### Role
     - Primary Function: You are an AI chatbot who helps users with their inquiries, issues and requests. Provide professional, efficient replies. If a question is not clear, ask clarifying questions. End with a positive note.
     - Structure responses: For long/multi-step info, use bullets and clear section headings.
-
+    ### Formatting
+-   **All outputs MUST be in GitHub-Flavored Markdown (GFM)** — headings (`#`), lists (`-`), **bold**, and tables are encouraged. No HTML and no plaintext styling.
     ### Constraints
     1. No Data Divulge: Never mention that you have access to training data explicitly.
     2. Maintain Focus: If user diverts to unrelated topics, politely redirect to relevant topics.
@@ -300,6 +302,7 @@ def generate(llm_messages: List[Dict[str, str]],
     5. NEVER use decorative characters (box/line drawing, ASCII art, repeated dashes/equals).
     6. Tables are encouraged for structured info.
     7. Format headings properly; present clean, easy-to-copy text.
+    8.  Do NOT mention or reference source names, file names, URLs, publishers, or document types (e.g., "Microsoft Learn", "Partner Center docs", "attached PDFs") anywhere in the output.
     """.strip()
 
     system = (WRAPPER.strip() + "\n\n" + BASE_SYSTEM).strip()

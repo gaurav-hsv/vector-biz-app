@@ -1,226 +1,52 @@
 # app/routes/message.py
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any, Iterator, List
+import json
+
+# Retrieval + LLM
 from ..search import vector_search
-from ..llm import generate_answer, detect_route, get_config_by_llm, is_country_answer, explain_from_dumped_config, generate_concise_answer, generate
-from ..calculations_config import CALCULATIONS_CONFIG
-from ..country_config import resolve_market_from_text
+from ..llm import stream_answer  # NEW: true streaming generator from o3
+
 # Sessions (Redis-backed)
-from ..sessions_redis import get_session, append_message, get_memory, set_memory
-
-# ---------------------------
-# NEW: lightweight context utils
-# ---------------------------
-import re, json
-
-# Pronoun / anaphora patterns we’ll rewrite using last topic
-_ANAPHORA = re.compile(
-    r"\b(this|that|these|those|it|them|the\s*(program|incentive|workshop|engagement|offer|scheme|activity|requirements?))\b",
-    re.I,
-)
-
-# Prefer explicit metadata keys from your ingest
-_TOPIC_KEYS = (
-    "engagement_name", "incentive_name", "name", "title",
-    "workload", "program", "product", "doc_name",
-)
-
-def _derive_topic_from_sources(sources: List[Dict[str, Any]]) -> Optional[str]:
-    # 1) Try metadata keys (strongest)
-    for s in sources or []:
-        meta = s.get("metadata") or {}
-        for k in _TOPIC_KEYS:
-            v = (meta.get(k) or "").strip()
-            if v and len(v) > 2:
-                return v
-    # 2) Fallback: extract a capitalized noun phrase ending with known terms
-    for s in sources or []:
-        text = (s.get("content") or "")
-        m = re.search(r"\b([A-Z][A-Za-z0-9+/&\-\s]{3,}?(?:Incentive|Workshop|Program|Engagement)s?)\b", text)
-        if m:
-            return m.group(1).strip()
-    return None
-
-def _store_topic(session_id: str, topic: str):
-    # Persist as a system message (no schema change)
-    append_message(session_id, "system", "CTX_TOPIC:" + topic)
-
-def _load_topic(session: dict) -> Optional[str]:
-    msgs = (session or {}).get("messages") or []
-    for m in reversed(msgs):
-        if m.get("role") == "system":
-            t = m.get("text") or ""
-            if t.startswith("CTX_TOPIC:"):
-                topic = t[len("CTX_TOPIC:"):].strip()
-                if topic:
-                    return topic
-    return None
-
-def _looks_like_followup_with_pronoun(msg: str) -> bool:
-    t = (msg or "").strip()
-    return bool(_ANAPHORA.search(t)) or (len(t.split()) <= 10 and bool(re.search(r"\b(eligibil|requirement|activities?|rate|amount|payment|timeline|scope)\w*\b", t, re.I)))
-
-
-def _patch_workshop_with_market_rate(cfg: Dict[str, Any], rate: int) -> Dict[str, Any]:
-    """Append (or set) market_rate field on each workshop engagement."""
-    if not isinstance(cfg, dict):
-        return {}
-    # shallow copy is enough for our patch usage
-    out = json.loads(json.dumps(cfg))  # cheap deep copy
-    workshops = out.get("workshop")
-    if not isinstance(workshops, list):
-        return out
-
-    for eng in workshops:
-        ffs = eng.get("form_fields")
-        if not isinstance(ffs, list):
-            ffs = []
-        # try to find existing market_rate
-        found = False
-        for f in ffs:
-            if str(f.get("field_name") or "").strip().lower() == "market_rate":
-                f["Value"] = rate
-                found = True
-                break
-        if not found:
-            ffs.append({
-                "field_name": "market_rate",
-                "about": "derived from country via static market mapping",
-                "label": "number",
-                "Value": rate,
-            })
-        eng["form_fields"] = ffs
-    out["workshop"] = workshops
-    return out
-
+from ..sessions_redis import get_session, append_message
 
 # ---------------------------
 # Router
 # ---------------------------
 router = APIRouter()
 
+
 class MessageIn(BaseModel):
     session_id: Optional[str] = None
     text: str = Field(min_length=1)
-    input_type: Optional[str] = None  # optional quick-pick
-    config: Optional[Any] = None  # optional partial config to patch
 
-# @router.post("/message")
-# def post_message(inp: MessageIn, debug: bool = Query(False, description="return debug info")):
-#     # Load/append user message
-#     session = get_session(inp.session_id)
-#     append_message(session["session_id"], "user", inp.text)
-#     session = get_session(session["session_id"])
 
-#     if inp.input_type == "market_country":
-#         is_country = is_country_answer(inp.text)
-#         if is_country:
-#             # FIX: resolve returns (rate, country, market)
-#             market, country, rate = resolve_market_from_text(inp.text)
-#             cfg_in = inp.config or {}
-#             # Ensure we have a numeric rate (handle accidental 'A'/'B'/'C' just in case)
-#             rate_val = rate
-#             if isinstance(rate_val, str):
-#                 MR = {"A": 163, "B": 116, "C": 70}
-#                 rate_val = MR.get(rate_val.upper(), None)
-#         # (if your resolver already returns 163/116/70, this stays as-is)
+def _ndjson(obj: Dict[str, Any]) -> bytes:
+    """Compact NDJSON encoder."""
+    return (json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
-#             if rate_val is not None:
-#                 cfg_patched = _patch_workshop_with_market_rate(cfg_in, rate_val)
-#                 append_message(session["session_id"], "assistant", json.dumps(cfg_patched))
-#                 return {
-#                 "type": "answer",
-#                 "session_id": session["session_id"],
-#                 "text": "",
-#                 "config": cfg_patched,
-#                 "recommendations": [],
-#                 }
-
-#     if inp.input_type == "calc_submitted":
-#         dump_cfg = inp.config or {}
-#         llm_out = explain_from_dumped_config(dump_cfg)
-
-#         append_message(session["session_id"], "assistant", llm_out.get("answer", ""))
-
-#         return {
-#             "type": "answer",
-#             "session_id": session["session_id"],
-#             "text": llm_out.get("answer", ""),
-#             "recommendations": [],
-#         }
-
-#     # Reuse last topic if user uses pronouns like "this incentive"
-#     last_topic = _load_topic(session)
-#     is_followup = bool(last_topic) and _looks_like_followup_with_pronoun(inp.text)
-#     effective_query = (f"{last_topic} {inp.text}".strip()) if is_followup else inp.text
-
-#     # Retrieval
-#     search_results = vector_search(effective_query)
-#     #print(f"Search results: {search_results}")
-#     sources = search_results.get("sources") or []
-#     # Derive and store topic for NEXT turn (from current retrieval)
-#     topic = _derive_topic_from_sources(sources)
-#     print(f"Derived topic: {topic}")
-#     if topic:
-#         _store_topic(session["session_id"], topic)
-
-#     # LLM answer on the same effective query + sources
-#     route = detect_route(inp.text)
-#     print(f"Detected user intent: {route}")
-
-#     if route == "calculation":
-#         # existing calculation path
-#         config = get_config_by_llm(inp.text, CALCULATIONS_CONFIG, sources)
-#         append_message(session["session_id"], "assistant", (json.dumps(config) or ""))
-#         session = get_session(session["session_id"])
-#         return {
-#             "type": "answer",
-#             "session_id": session["session_id"],
-#             "text": "",
-#             "config": config,
-#             "recommendations": [],
-#         }
-#     history = session.get("messages", [])[-10:]
-#     llm_messages = []
-#     for m in history:
-#             role = m.get("role", "user")
-#             content = m.get("text", "")
-#             if content:
-#                 llm_messages.append({"role": role, "content": content})
-#     if not llm_messages or llm_messages[-1]["content"] != effective_query:
-#             llm_messages.append({"role": "user", "content": effective_query})
-    
-#     if(route == 'detail'):
-#         result = generate_answer(llm_messages, sources)
-#     else:
-#         result = generate_concise_answer(llm_messages, sources) 
-    
-#     append_message(session["session_id"], "assistant", (result.get("answer") or ""))
-
-#     session = get_session(session["session_id"])
-#     resp = {
-#             "type": "answer",
-#             "session_id": session["session_id"],
-#             "text": result.get("answer"),
-#             "recommendations": result.get("recommendations", []),
-#     }
-#     return resp
-    
 
 @router.post("/message")
 def post_message(inp: MessageIn, debug: bool = Query(False, description="return debug info")):
+    """
+    Strict streaming endpoint. Always returns application/x-ndjson with frames:
+      start → delta* → final (or error)
+    """
+    # Ensure session & log the user message
     session = get_session(inp.session_id)
     append_message(session["session_id"], "user", inp.text)
     session = get_session(session["session_id"])
+    session_id = session["session_id"]
 
     # Retrieval
     search_results = vector_search(inp.text)
-    sources = search_results.get("sources") or []
+    fused: List[Dict[str, Any]] = search_results.get("sources") or []
 
-    # Build dialogue
+    # Build short dialogue window
     history = session.get("messages", [])[-10:]
-    llm_messages = []
+    llm_messages: List[Dict[str, str]] = []
     for m in history:
         role = m.get("role", "user")
         content = m.get("text", "")
@@ -229,31 +55,66 @@ def post_message(inp: MessageIn, debug: bool = Query(False, description="return 
     if not llm_messages or llm_messages[-1]["content"] != inp.text:
         llm_messages.append({"role": "user", "content": inp.text})
 
-    # Let the model decide: ask or answer
-    result = generate(llm_messages, sources)
+    def event_stream() -> Iterator[bytes]:
+        # 1) START frame
+        yield _ndjson({"event": "start", "session_id": session_id})
 
-    # Store what the user will see
-    out_text = result.get("question") if result.get("type") == "follow_up" else result.get("answer", "")
-    append_message(session["session_id"], "assistant", out_text)
+        # 2) TRUE MODEL STREAM
+        full_text: str = ""
+        final_payload: Optional[Dict[str, Any]] = None
 
-    session = get_session(session["session_id"])
+        try:
+            for ev in stream_answer(llm_messages, fused):
+                et = ev.get("event")
+                if et == "delta":
+                    # Append text & stream to client
+                    delta = ev.get("text", "")
+                    if not isinstance(delta, str):
+                        continue
+                    full_text += delta
+                    yield _ndjson({"event": "delta", "text": delta})
 
-    # Pass-through envelope
-    if result["type"] == "follow_up":
-        out_text = result["question"]
-        append_message(session["session_id"], "assistant", out_text)
-        return {
-            "type": "answer",
-            "session_id": session["session_id"],
-            "text": result["question"],
-            "missing_fields": result["missing_fields"]
-        }
+                elif et == "final":
+                    # Single final payload with {type, text, missing_fields}
+                    final_payload = ev.get("result") or {}
+                    break
 
-    # type == "answer"
-    out_text = result["answer"]
-    append_message(session["session_id"], "assistant", out_text)
-    return {
-        "type": "answer",
-        "session_id": session["session_id"],
-        "text": result["answer"]
+                elif et == "error":
+                    # Forward model-layer error to client, then end
+                    detail = ev.get("detail") or "Unknown error"
+                    yield _ndjson({"event": "error", "detail": detail})
+                    return
+
+            # 3) Session write (exactly once) + FINAL frame
+            if not final_payload:
+                # Safety: if model didn't provide final envelope, synthesize one
+                final_payload = {"type": "answer", "text": full_text, "missing_fields": []}
+
+            # Persist assistant message once
+            if final_payload.get("type") == "follow_up":
+                # For follow_up, text is the question we show the user
+                append_message(session_id, "assistant", final_payload.get("text", ""))
+            else:
+                # Normal answer
+                append_message(session_id, "assistant", final_payload.get("text", ""))
+
+            yield _ndjson({"event": "final", "result": final_payload})
+
+        except HTTPException as he:
+            # Propagate known HTTP exceptions (e.g., timeout)
+            yield _ndjson({"event": "error", "detail": he.detail})
+            raise
+        except Exception as e:
+            # Unknown failures → error frame then 500
+            detail = str(e) or "Internal server error"
+            yield _ndjson({"event": "error", "detail": detail})
+            raise HTTPException(status_code=500, detail=detail)
+
+    headers = {
+        "Content-Type": "application/x-ndjson",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",  # important for Nginx to not buffer stream
     }
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson", headers=headers)

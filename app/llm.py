@@ -209,10 +209,12 @@ DECISION LOGIC (PERSONAL ONLY — YOU MUST FOLLOW)
 3) If missing_fields is NON-EMPTY:
    - Do NOT list incentive names, rates, amounts, or claim steps.
    - Ignore CONTEXT for now.
+   - IN case of calculations make sure never ask user the market rate(for this only ask country if not provided), the cap, and the percentage(as it will always in context)
    - Return FOLLOW-UP asking **only** the missing_fields (max 5, most-critical first).
 4) If missing_fields is EMPTY:
    - Use ONLY CONTEXT to produce a structured, personalized determination.
    - Return ANSWER.
+5) - When user asking to CALCULATE the SPD/PARTNER ELIGIBILITY- Do calcultion using the context provided and if any field is missing ask for that.
 
 STYLE & GUARDS
 - All `question`/`answer` text must be valid GFM.

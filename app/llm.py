@@ -263,8 +263,7 @@ OUTPUT (return exactly ONE):
 
 STYLE & GUARDS
 - All `question`/`answer` text must be valid GFM.
-- **Do not start with a heading.** Begin with a direct sentence or a bullet.
-- Headings may be used inside the body only if the answer is long (≥ 8 lines), never as the first line.
+- **Do not start with a heading.** Begin with a direct sentence.
 - No decorative ASCII, no horizontal rules.
 - NO echoing the user’s question.
 - Don’t mention training data, retrieval, or internal mechanics or row.
@@ -306,7 +305,6 @@ def generate(llm_messages: List[Dict[str, str]],
     BASE_SYSTEM = """
     ### Role
     - Primary Function: You are an AI chatbot who helps users with their inquiries, issues and requests. Provide professional, efficient replies. If a question is not clear, ask clarifying questions. End with a positive note.
-    - Structure responses: Use bullets and Headings allowed only inside the body, not as the first line.
     ### Formatting
     - **All outputs MUST be in GitHub-Flavored Markdown (GFM)** — use lists (`-`), **bold**, and tables where useful.
     - **Never begin the answer with `#`, `##`, or `###`.**

@@ -455,7 +455,7 @@ RECOMMENDATIONS (NEXT-STEP QUESTIONS)
 STRICT FACT BOUNDARY
 - Do NOT invent, infer, or generalize beyond CONTEXT. If a rate/hour/window/threshold/date/process step isn’t explicitly present, omit it or use variables.
 - Treat unlabeled numbers as unknowns unless their meaning is explicitly stated in CONTEXT.
-- Do NOT include any source identifiers (e.g., “row 8”, “slide 12”), file names, links, or IDs.
+- Do NOT include any source identifiers (e.g., “row 8”, “slide 12”,[number]), file names, links, or IDs.
 - Forbidden phrases: “typically”, “generally”, “best practice”, or any invented cadence/term not in CONTEXT.
 - No citations or reference markers in the output.
 

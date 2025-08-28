@@ -5,6 +5,7 @@ from unittest import result
 from langchain_openai import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage
 import re
+from fastapi import HTTPException
 
 from .config import settings
 from .country_config import resolve_market_from_text, MARKET_RATE  # noqa: F401 (import used for clarity)
@@ -189,6 +190,8 @@ def _o3_client(json_schema: Optional[dict] = None, max_output_tokens: int = 2048
     return ChatOpenAI(
         model="o3",
         reasoning={"effort": "high"},
+        timeout=110,
+        max_retries=1,
         model_kwargs={
             "response_format": response_format,
             "max_output_tokens": max_output_tokens
@@ -329,11 +332,17 @@ def generate(llm_messages: List[Dict[str, str]],
         "CONTEXT (authoritative; do not use outside knowledge):\n"
         f"{context_block}\n"
     )
-
-    llm = _o3_client(json_schema=SCHEMA, max_output_tokens=4000)
-    msg = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
-    result = _safe_json_from_msg(msg)
-    return _validate_envelope(result)
+    try:
+        llm = _o3_client(json_schema=SCHEMA, max_output_tokens=4000)
+        msg = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
+        result = _safe_json_from_msg(msg)
+        return _validate_envelope(result)
+    except Exception as e:
+        # If your stack raises a specific timeout error type, check that here
+        if "timed out" in str(e).lower():
+            # Return JSON that your frontend already understands
+            raise HTTPException(status_code=504, detail="LLM timed out")
+        raise
 
 # ----------------------------
 # Answer Generation (STRICT JSON)

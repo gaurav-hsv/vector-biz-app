@@ -3,7 +3,7 @@
 import json
 import re
 from typing import Any, Dict, Iterator, List, Optional
-
+from decimal import Decimal
 from fastapi import HTTPException
 from langchain_openai import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage
@@ -14,7 +14,6 @@ O3_MODEL = "o3"  # strongest reasoning model
 DEFAULT_CTX_N = 30
 DEFAULT_CTX_FULL = True
 DEFAULT_CTX_MAX_CHARS = 90_000
-
 FINAL_PREFIX = "@@FINAL@@"  # sentinel that precedes the final compact JSON
 
 
@@ -94,29 +93,72 @@ def _safe_json(s: str) -> Any:
     trimmed = s1.strip()
     return {"answer": trimmed if trimmed else "—"}
 
-
-def _msg_text(msg) -> str:
-    """
-    LangChain + OpenAI Responses: `AIMessage.content` can be a string OR a list of blocks.
-    This normalizes it to a single text string.
-    """
-    c = getattr(msg, "content", msg)
-    if isinstance(c, str):
-        return c
-    if isinstance(c, list):
-        out = []
-        for part in c:
-            if isinstance(part, dict):
-                t = part.get("text")
-                if t:
-                    out.append(t)
-        return "\n".join(out).strip()
-    return str(c).strip()
-
-
 def _json_compact(obj: dict) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
+def _json_default_decimal(o: Any):
+    if isinstance(o, Decimal):
+        return str(o)  # keep precision-friendly on wire/prompt
+    raise TypeError
+
+def _prune_none(v: Any) -> Any:
+    if isinstance(v, dict):
+        return {k: _prune_none(x) for k, x in v.items() if x is not None}
+    if isinstance(v, list):
+        return [ _prune_none(x) for x in v if x is not None ]
+    return v
+
+def _drop_keys(v: Any, banned: set[str]) -> Any:
+    if isinstance(v, dict):
+        out = {}
+        for k, x in v.items():
+            if k in banned:
+                continue
+            out[k] = _drop_keys(x, banned)
+        return out
+    if isinstance(v, list):
+        return [ _drop_keys(x, banned) for x in v ]
+    return v
+
+def _project_session_context(session: Optional[Dict[str, Any]]) -> str:
+    """
+    Build a compact JSON block from session fields we care about.
+    - Keeps only `user_profile` and (optionally) `memory.state.last_calc` if present.
+    - Drops any `calculated_value` keys and None values.
+    - Decimal-safe; length-capped for prompt hygiene.
+    """
+    if not session or not isinstance(session, dict):
+        return ""  # no-op
+
+    snapshot: Dict[str, Any] = {}
+
+    # Prefer root key if you are writing user_profile there (your new updater does).
+    pp = session.get("user_profile")
+    # Optional: also allow legacy location under memory.state
+    mem = session.get("memory") or {}
+    state = mem.get("state") or {}
+    last_calc = state.get("last_calc")
+
+    if isinstance(pp, dict) and pp:
+        snapshot["user_profile"] = pp
+    if last_calc:
+        snapshot["last_calc"] = last_calc
+
+    if not snapshot:
+        return ""
+
+    # Drop noisy/computed fields everywhere
+    snapshot = _drop_keys(snapshot, banned={"calculated_value"})
+    # Remove Nones
+    snapshot = _prune_none(snapshot)
+
+    try:
+        text = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), default=_json_default_decimal)
+    except TypeError:
+        # extremely defensive: if something inside wasn't serializable
+        text = _json_compact(snapshot)
+
+    return text
 
 def _build_context(
     fused: List[Dict[str, Any]],
@@ -177,9 +219,11 @@ def _o3_stream_client(max_output_tokens: int = 4000) -> ChatOpenAI:
         model_kwargs={"max_output_tokens": max_output_tokens},
     )
 
+
 def stream_answer(
     llm_messages: List[Dict[str, str]],
     fused: List[Dict[str, Any]],
+    session: Optional[Dict[str, Any]] = None,
     max_output_tokens: int = 4000,
 ) -> Iterator[Dict[str, Any]]:
     """
@@ -192,6 +236,7 @@ def stream_answer(
     """
     context_block = _build_context(fused)
     dialogue = _as_dialogue(llm_messages)
+    session_block = _project_session_context(session)
 
     system = """"You are an AI Chatbot that provides guidance to Microsoft partners on Business Applications solutions. If a question is not clear, ask clarifying questions. End with a positive note.
 
@@ -214,13 +259,14 @@ GLOBAL CONSTRAINTS
 DEFINITIONS
 - MATERIAL DEPENDENCE (MD): If an answer depends on any case variables (partner_type, market/country, MCI, SPD, attribution_type, workloads, volume/ACR/MCV, time window) and the user refers to their own customer/tenant/deal, prefer PERSONAL routing.
 - ELIGIBILITY SIGNALS (ES): The minimal set of facts required to decide the user’s question or compute a result. Derive ES from the policy/rules in CONTEXT for the detected topic; do not hardcode field names and do not expose ES lists to the user.
-**SCOPE**
 
-- **Domain (Business Applications only):** Microsoft Commerce Platform; Microsoft Commerce Incentives (MCI); Cloud Solution Provider (CSP) program and CSP incentives/earning opportunities; MCI-funded engagements; Solutions Partner Designation (SPD); transition from legacy to New Commerce Experience (NCE); Partner Center tools, processes, and troubleshooting — all limited to the Business Applications solution area and solution plays.
+**SCOPE**
+-**Domain (Business Applications only):** Microsoft Commerce Platform; Microsoft Commerce Incentives (**MCI**, the umbrella for Business Applications incentives); activity-based incentives under MCI (MCI-funded engagements/workshops); transaction-based incentives under MCI (CSP incentives on Business Applications transactions); Solutions Partner Designation (SPD); transition from legacy to New Commerce Experience (NCE); Partner Center tools, processes, and troubleshooting — all limited to the Business Applications solution area and solution plays.
 
 - **Covered topics (Business Applications only):**
-  - **Microsoft Commerce Incentives (MCI):** Answer queries about the Microsoft Commerce Incentives program, Partner Center navigation (as available in CONTEXT), MCI incentives, eligibility for MCI-funded engagements/workshops (including pre-sales workshops), workshop/engagement payout calculations, incentive calculations, timelines, and related topics. Optimization or case-specific questions follow the INTENT ROUTER.
-  - **Cloud Solution Provider (CSP):** Answer queries about the CSP program and enrollment types, partner eligibility, CSP incentive types, how CSP incentives are calculated, and strategies to maximize earnings (including stacking with MCI) per CONTEXT, plus other CSP guidance relevant to Business Applications. For optimization/case scenarios, follow the PERSONAL flow and collect minimal ES.Treat the CSP Core incentive as the base. If eligibility conditions are satisfied, stack the applicable Strategic Product Accelerator(s) and CSP Growth incentives on top of the core amount. Compute in this order — Core → Accelerator(s) → Growth — showing the core subtotal, each stacked component, and the final total. Apply only the rates/caps defined in CONTEXT, avoid double-counting, and follow any exclusivity or cap rules exactly as stated in CONTEXT.
+  - **MCI umbrella & incentive types:** Treat MCI as the umbrella. There are two incentive types:
+    1) **Activity-based**: MCI-funded engagements/workshops (e.g., pre-sales workshops, accelerators). Answer eligibility, prerequisites, timelines, and payout calculations strictly per CONTEXT. Optimization or case-specific questions follow the INTENT ROUTER.
+    2) **Transaction-based (CSP)**: CSP incentives on Business Applications transactions. Cover program/enrollment types, partner eligibility, calculation mechanics, and optimization — case-specific questions follow the INTENT ROUTER. Compute CSP incentives in this order: **Core → Strategic Product Accelerator(s) → Growth**, showing the core subtotal, each stacked component, and the final total. Apply only rates/caps from CONTEXT, avoid double-counting, and follow any exclusivity/cap rules exactly as stated in CONTEXT.
   - **Solutions Partner Designation (SPD):** Answer queries on SPD categories and Partner Capability Score (PCS), PCS pillars/metrics and how they are calculated, how SPD eligibility is determined from PCS, benefits of holding SPD, and which incentives require SPD. Compute **SPD eligibility** (not payouts) using CONTEXT; advise on increasing PCS where applicable.
   - **NCE transition & Partner Center:** Explain NCE transition considerations and Partner Center tools/processes/troubleshooting **as documented in CONTEXT** (no web).
 
@@ -280,6 +326,7 @@ STREAMING PROTOCOL — MUST FOLLOW
     - "text": the **exact** visible text you just streamed (must not start with a heading)
 - Do **not** wrap the JSON in code fences or add any extra characters.
 - Output the @@FINAL@@ trailer exactly once, at the very end."""
+    
     user = (
         "DIALOGUE SO FAR:\n"
         f"{dialogue}\n\n"
@@ -288,6 +335,11 @@ STREAMING PROTOCOL — MUST FOLLOW
         f"{context_block}\n"
     )
 
+    if session_block:
+        user += (
+            "\nSESSION SNAPSHOT (user-provided profile & calculator inputs; treat as ground truth if present):\n"
+            f"{session_block}\n"
+        )
     try:
         llm = _o3_stream_client(max_output_tokens=max_output_tokens)
         # Iterate true token stream
@@ -299,7 +351,7 @@ STREAMING PROTOCOL — MUST FOLLOW
         final_started = False
         brace_depth = 0
         final_result: Optional[Dict[str, Any]] = None
-
+        print(user)
         for chunk in llm.stream([SystemMessage(content=system), HumanMessage(content=user)]):
             # Extract text from chunk (robust to various content shapes)
             piece = getattr(chunk, "content", None)

@@ -159,9 +159,17 @@ def post_message(inp: MessageIn, debug: bool = Query(False, description="return 
             yield _ndjson({"event": "error", "detail": he.detail})
             raise
         except Exception as e:
-            detail = str(e) or "Internal server error"
-            yield _ndjson({"event": "error", "detail": detail})
-            raise HTTPException(status_code=500, detail=detail)
+            error_msg = str(e) or "Internal server error"
+            
+            # Handle connection-related errors gracefully
+            if any(keyword in error_msg.lower() for keyword in ["peer closed", "connection", "incomplete", "chunked"]):
+                print(f"Client connection closed during streaming: {error_msg}")
+                # Don't raise an exception for client disconnections
+                return
+            
+            # For other errors, send error event and raise exception
+            yield _ndjson({"event": "error", "detail": error_msg})
+            raise HTTPException(status_code=500, detail=error_msg)
 
     headers = {
         "Content-Type": "application/x-ndjson",

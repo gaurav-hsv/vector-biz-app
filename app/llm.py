@@ -213,10 +213,12 @@ def _o3_stream_client(max_output_tokens: int = 4000) -> ChatOpenAI:
     return ChatOpenAI(
         model=O3_MODEL,
         reasoning={"effort": "high"},
-        timeout=110,
+        timeout=90,  # Reduced timeout for better connection management
         max_retries=1,
         # No response_format in streaming mode; allow free-form streaming text.
         model_kwargs={"max_output_tokens": max_output_tokens},
+        # Add connection timeout settings
+        request_timeout=90,
     )
 
 
@@ -279,6 +281,16 @@ IN-SCOPE CAPABILITIES
 - Minimal follow-ups: if human input is still required, …ask only for the smallest necessary set (most critical first), in natural language (no field names).
 - Decide & compute: when sufficient information exists, determine eligibility, explain Business Applications workshops/engagements/MCI, and compute **Business Applications CSP and workshop payouts** per CONTEXT rules; **calculate SPD eligibility**.
 - Deliver final answer: synthesize clearly and concisely with bullets/tables where helpful.
+- **SESSION DATA UTILIZATION**: When session data is available, actively use it to:
+  * Pre-populate calculations with user's actual values
+  * Personalize responses based on their partner profile
+  * Skip redundant questions about information already provided
+  * Reference their specific business context and designations
+  * Use `user_profile.partner_type` for partner eligibility checks
+  * Use `user_profile.solution_designations` for designation status
+  * Use `user_profile.specializations` for workload coverage
+  * Use metric values (billed_revenue, global_tier1, etc.) for calculations
+  * Use `calculation_breakdown` data if available for incentive computations
 
 INTENT ROUTER (RUN FIRST)
 - PERSONAL: Route here if any of the following are true:
@@ -338,7 +350,16 @@ STREAMING PROTOCOL — MUST FOLLOW
 
     if session_block:
         user += (
-            "\nSESSION SNAPSHOT (user-provided profile & calculator inputs; treat as ground truth if present):\n"
+            "\n\nSESSION DATA INSTRUCTIONS:\n"
+            "Below is the user's profile and calculator inputs. Use this information to:\n"
+            "1. Personalize responses based on their partner type, designations, and specializations\n"
+            "2. Pre-populate calculations using their provided values (billed_revenue, global_tier1, etc.)\n"
+            "3. Reference their specific business context when relevant\n"
+            "4. Skip asking for information they've already provided\n"
+            "5. Use their actual values for incentive calculations instead of asking for them\n"
+            "6. **IMPORTANT**: When calculating incentives, use their actual values from the session data\n"
+            "7. **IMPORTANT**: Don't ask for information they've already provided in their profile\n\n"
+            "SESSION SNAPSHOT:\n"
             f"{session_block}\n"
         )
     try:
@@ -352,7 +373,6 @@ STREAMING PROTOCOL — MUST FOLLOW
         final_started = False
         brace_depth = 0
         final_result: Optional[Dict[str, Any]] = None
-        print(user)
         for chunk in llm.stream([SystemMessage(content=system), HumanMessage(content=user)]):
             # Extract text from chunk (robust to various content shapes)
             piece = getattr(chunk, "content", None)
@@ -456,8 +476,19 @@ STREAMING PROTOCOL — MUST FOLLOW
         # Pass-through HTTP exceptions (router will handle)
         raise
     except Exception as e:
-        # Upstream will send this as an error frame then raise 500/504
-        raise HTTPException(status_code=504 if "timed out" in str(e).lower() else 500, detail=str(e) or "LLM error")
+        # Handle connection errors gracefully
+        error_msg = str(e) or "LLM error"
+        
+        # Check for connection-related errors
+        if any(keyword in error_msg.lower() for keyword in ["peer closed", "connection", "incomplete", "chunked"]):
+            # Connection was closed by client - this is not a server error
+            print(f"Client connection closed: {error_msg}")
+            # Don't raise an exception, just return gracefully
+            return
+        
+        # For other errors, raise appropriate HTTP exception
+        status_code = 504 if "timed out" in error_msg.lower() else 500
+        raise HTTPException(status_code=status_code, detail=error_msg)
 
 
 def _finalize_envelope(parsed: Any, visible_text: str) -> Dict[str, Any]:

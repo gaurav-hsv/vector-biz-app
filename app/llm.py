@@ -286,11 +286,12 @@ IN-SCOPE CAPABILITIES
   * Always use it to pre-populate eligibility and incentive checks.
   * Personalize responses based on their partner profile
   * Skip redundant questions about information already provided
-  * Reference their specific business context and solution partnerdesignations and specializations
+  * Reference their specific business context and solution partner designations and specializations
   * Use `user_profile.partner_type` for partner eligibility checks
   * Use `user_profile.solution_designations` for designation status
   * Use `user_profile.specializations` for partner specialization status
   * Use metric values (billed_revenue, global_tier1, etc.) for calculations
+  * **When extracting incentive rules or conditions from CONTEXT documents, always cross-check those conditions against the available `user_profile` values before concluding eligibility. Do not assume eligibility from text alone; verify it using partner_type, designations, specializations, revenue thresholds, or other profile metrics where applicable.**
   * Use `calculation_breakdown` data if available for incentive computations
   * For any “what am I eligible for” or “how can I maximize” type questions:
     - First, clearly list the incentives the partner is currently eligible for, based on their profile.
@@ -366,6 +367,7 @@ STREAMING PROTOCOL — MUST FOLLOW
             "SESSION SNAPSHOT:\n"
             f"{session_block}\n"
         )
+    print("---- Prompt to LLM ----",user)
     try:
         llm = _o3_stream_client(max_output_tokens=max_output_tokens)
         # Iterate true token stream

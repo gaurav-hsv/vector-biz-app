@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterator, List, Optional
 from decimal import Decimal
 from fastapi import HTTPException
 from langchain_openai import ChatOpenAI
-from langchain.schema import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 
 O3_MODEL = "o3"  # strongest reasoning model
 
